@@ -7,7 +7,12 @@
 #include "gps.h"
 
 // T-Beam specific hardware
-#define BUILTIN_LED 21
+#define AUX_BUTTON 39
+#ifdef TTGO_TBEAM_OLDV
+ #define BUILTIN_LED 21 // TBEAM OLD
+#else
+ #define BUILTIN_LED 14 // TBEAM T22 V07
+#endif
 
 char s[32]; // used to sprintf for Serial output
 uint8_t txBuffer[9];
@@ -20,17 +25,70 @@ void os_getArtEui (u1_t* buf) { }
 void os_getDevEui (u1_t* buf) { }
 void os_getDevKey (u1_t* buf) { }
 
+const __FlashStringHelper * sfmod_text(const _dr_eu868_t sfmod) {
+  switch(sfmod) {
+    case DR_SF12:
+  return F("SF12");
+    case DR_SF11:
+  return F("SF11");
+    case DR_SF10:
+  return F("SF10");
+    case DR_SF9:
+  return F("SF9");
+    case DR_SF8:
+  return F("SF8");
+    case DR_SF7:
+  return F("SF7");
+    case DR_SF7B:
+  return F("SF7B");
+    case DR_FSK:
+  return F("FSK");
+    default:
+  return F("UNK");
+  }
+}
+
+_dr_eu868_t get_new_mod() {
+      // Alterna modulacao
+      int16_t rmod = random(1 << DR_SF7);
+      if (LMIC.seqnoUp % 10 == 0) // de 10 em 10 as modulações nao incluem SF7 e SF8
+        rmod |= 0x0003;
+      int8_t imod;
+      _dr_eu868_t mod;
+      static _dr_eu868_t lmod;
+      for (imod = DR_SF7; rmod & 0x01; --imod)
+        rmod >>= 1;
+      mod = (_dr_eu868_t)(imod % DR_NONE);
+      if (mod < DR_SF9 && lmod < DR_SF9)
+        mod = DR_SF9;
+      lmod = mod;
+      //    _dr_eu868_t mod = (_dr_eu868_t)(LMIC.seqnoUp % DR_NONE);
+      return mod;
+}
+
 static osjob_t sendjob;
+static osjob_t ledjob;
 // Schedule TX every this many seconds (might become longer due to duty cycle limitations).
 const unsigned TX_INTERVAL = 30;
 
-// Pin mapping
+#ifdef TTGO_TBEAM_OLDV
+// Pin mapping NGOMES
 const lmic_pinmap lmic_pins = {
   .nss = 18,
   .rxtx = LMIC_UNUSED_PIN,
-  .rst = LMIC_UNUSED_PIN, // was "14,"
+  .rst = LMIC_UNUSED_PIN,
   .dio = {26, 33, 32},
 };
+#else
+// Pin mapping PAMR
+const lmic_pinmap lmic_pins = {
+  .nss = 18,
+  .rxtx = LMIC_UNUSED_PIN,
+//  .rst = LMIC_UNUSED_PIN, // was "14,"
+  .rst = 23, // TBEAM T22 V07
+  .dio = {26, 33, 32},
+};
+#endif
 
 void onEvent (ev_t ev) {
   switch (ev) {
@@ -77,7 +135,10 @@ void onEvent (ev_t ev) {
         Serial.println(s);
       }
       // Schedule next transmission
-      os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+      _dr_eu868_t newmod;
+      newmod = get_new_mod();
+      LMIC_setDrTxpow(newmod, 14);
+      os_setTimedCallback(&sendjob, os_getTime() + sec2osticks( (DR_SF7B - newmod) * TX_INTERVAL ), do_send);
       break;
     case EV_LOST_TSYNC:
       Serial.println(F("EV_LOST_TSYNC"));
@@ -101,6 +162,10 @@ void onEvent (ev_t ev) {
   }
 }
 
+void do_ledoff(osjob_t* j) {  
+      digitalWrite(BUILTIN_LED, LOW);
+}
+
 void do_send(osjob_t* j) {  
 
   // Check if there is not a current TX/RX job running
@@ -114,12 +179,19 @@ void do_send(osjob_t* j) {
     {
       // Prepare upstream data transmission at the next possible time.
       gps.buildPacket(txBuffer);
-      LMIC_setTxData2(1, txBuffer, sizeof(txBuffer), 0);
-      Serial.println(F("Packet queued"));
+//      LMIC_setTxData2(1, txBuffer, sizeof(txBuffer), 0);
+      LMIC_setTxData2(2, txBuffer, sizeof(txBuffer), 0); // PAMR Compatibilidade com APP TTN
       digitalWrite(BUILTIN_LED, HIGH);
+      Serial.print(F("Packet "));
+      Serial.print(LMIC.seqnoUp);
+      Serial.print(F(" queued at "));
+      Serial.println(sfmod_text((_dr_eu868_t)LMIC.datarate));
     }
     else
     {
+      digitalWrite(BUILTIN_LED, HIGH);
+      // Led will go off in 100ms
+      os_setTimedCallback(&ledjob, os_getTime() + ms2osticks(100), do_ledoff);
       //try again in 3 seconds
       os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(3), do_send);
     }
@@ -165,7 +237,7 @@ void setup() {
   do_send(&sendjob);
   pinMode(BUILTIN_LED, OUTPUT);
   digitalWrite(BUILTIN_LED, LOW);
-  
+  pinMode(AUX_BUTTON, INPUT);
 }
 
 void loop() {
