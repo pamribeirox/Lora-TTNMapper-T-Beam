@@ -174,9 +174,10 @@ void do_send(osjob_t* j) {
     Serial.println(F("OP_TXRXPEND, not sending"));
   }
   else
-  { 
-    if (gps.checkGpsFix())
-    {
+  {
+    static uint8_t nofixcnt = 0; 
+    if (gps.checkGpsFix()) {
+      nofixcnt = 0;
       // Prepare upstream data transmission at the next possible time.
       gps.buildPacket(txBuffer);
 //      LMIC_setTxData2(1, txBuffer, sizeof(txBuffer), 0);
@@ -189,6 +190,16 @@ void do_send(osjob_t* j) {
     }
     else
     {
+// Send a dummy message at DR_SF7 to port 16 each 10 try without fix
+      if(++nofixcnt % 10 == 0) {
+        txBuffer[0] = 0xFF;
+        LMIC_setDrTxpow(DR_SF7, 14);
+        LMIC_setTxData2(16, txBuffer, 1, 0);
+        Serial.print(F(" Dummy packet "));
+        Serial.print(LMIC.seqnoUp);
+        Serial.print(F(" queued at "));
+        Serial.println(sfmod_text((_dr_eu868_t)LMIC.datarate));
+      }
       digitalWrite(BUILTIN_LED, HIGH);
       // Led will go off in 100ms
       os_setTimedCallback(&ledjob, os_getTime() + ms2osticks(100), do_ledoff);
